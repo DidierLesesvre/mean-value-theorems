@@ -1,0 +1,1180 @@
+# Updated Sept 2019
+# Purpose : the circle method is widely used to address problems of additive number theory. One of the modern tools involved is the mean value theorem (Vaughan, Wooley), which in some instance provides bounds for integrals that are explicit but algorithmically computable (see Ford for some optimisation of Wooley's description). This code is provided to compute these bounds.
+# Note : references are given, the name of each algorithm is the one given by Wooley (Section 5's remark in "Large Improvements...", Annals).
+# Stable URL : lesesvre.perso.math.cnrs.fr
+
+import sage.all
+import csv
+from multiprocessing import Pool
+
+#########
+# Method B1: Vaughan's II iterative method
+#########
+# Reference :  Theorem 1.4 in Vaughan,  "A new iterative method... II", J. London Math Soc, 1989.
+# This method will be used for s=3 and s=4 in practice, for the mean value theorems.
+# The results match the Table 1.1 given in loc. cit.
+
+def b1_theta(k):
+    """
+    Returns the theta appearing in Vaughan's Theorem 1.4.
+
+    Theta is a parameter needed in the application of Vaughan's algorithm for mean value theorems. It is the smallest non-negative root of an explicit polynomial.
+
+    Parameters
+    ----------
+    k : int
+        has to be >= 5
+
+    Returns
+    -------
+    float
+        smallest non-negative root of an explicit polynomial in Thm 1.4
+
+    Examples
+    -------
+    >>> b1_theta(19)
+        0.00334525131929128
+    """
+    R = sage.all.PolynomialRing(sage.all.RR,'x')
+    x=R.gen()
+    if k>=8 and k%2==0: # These conditions are the one in Theorem 1.4
+        e=1
+    else:
+        e=0
+    P=3-x*(3*k**2-11*k-e*k+22+e)-x**2*(15*k+e*k-48-3*e)-x**3*(2*k+32+2*e) # Polynomial considered in Theorem 1.4
+    t=10**80
+    for l in P.roots():
+        if l[0]>0 and l[0]<t:
+            t=l[0]
+    return t
+
+def b1_method(k,s):
+    """
+    Returns the bound lambda in Theorem 1.4 for s=3 and s=4
+
+    For smooth enough numbers and large enough P, the sumber S(P,P^eta) of solutions of the diophantine equation x_1^k + ... + x_s^k = y_1^k + ... + y_s^k is bounded by P^lambda.
+
+    Parameters
+    ----------
+    k : int
+        has to be >= 5
+    s : int
+        has to be either 3 or 4. (For k=4, only s=3)
+
+    Returns
+    -------
+    list
+        lambda_s
+
+    Examples
+    -------
+    >>> N(b1_method(4,3)) #N forces evaluation to decimal
+        3.18614066163451
+    >>> b1_method(8,3)
+        3.04961105296376
+    >>> b1_method(8,4)
+        4.22892842853338
+    """
+    theta=b1_theta(k)
+    if k>=5 and s==3:
+        return 3+2*theta
+    elif k>=5 and s==4:
+        return (4+(k-3)*theta)*1.0/(1-theta)
+    elif k==4 and s==3:
+        return 3+2.0/(5+sage.all.sqrt(33))
+    return 3+2*theta #place holder, this is not supposed to be used.
+    
+#########
+#Method *: Wooley iterative method
+#########
+# Reference : Lemma 3.2, Wooley, "Large Improvements in Waring's problem", Annals, 1992
+# This method will be used for neither too big s, nor s=3, 4
+# The results match the Table 5.1 in loc. cit.
+
+def star_method(k, mu, t, steps):
+    """
+    Returns theta, lambda given by Wooley's algorithm in his Lemma 3.2
+
+    Assume that we already have a diophantine bound mu such that that, for smooth enough numbers, the number of solutions of the diophantine equation with 2t variables x_1^k + ... + x_t^k = y_1^k + ... + y_t^k is bounded by P^mu. Wooley's algorithm iteratively increases the number of variables and gives that the number of solutions of the diophantine equation with 2s variables x_1^k + ... + x_s^k = y_1^k + ... + y_s^k is bounded by P^lambda.
+
+    Parameters
+    ----------
+    k : int
+        the power appearing in the diophantine equation
+    t : int
+        positive
+        number of variables (halved) in the original equation
+    mu : float
+        the bound assumed on the original equation
+        shall moreover satisfy 2t - k < mu <= 2t
+    steps : int
+        number of iterations in the algorithm, s_final = t+steps
+
+    Returns
+    -------
+    list
+        theta_s, lambda(s)
+
+    Examples
+    -------
+    >>> star_method(6, 4.333334, 4, 1)
+        (0.120124286470038, 5.77378963697395)
+    >>> star_method(8, 4.228929, 4, 8)
+        (0.111725416004558, 16.7411667155573)
+    """
+    T=[0] # list of succesive theta_s, initialized with theta_t
+    L=[mu] # list of successive lambda_s, initialized with lambda_t
+    D=[mu-2*t+k] # list of successive Delta(s), initialized with Delta(t)
+    for s in range(1,steps+1): # Iteration of the steps (3.9)-(3.11)
+        T.append(1.0/(k+D[s-1])+(1.0/k-1/(k+D[s-1]))*((k-D[s-1])/(2.0*k))**(k-1))
+        D.append((D[s-1])*(1-T[s])+k*T[s]-1)
+        L.append(2*(t+s)-k+D[s]) # Caution : the value of s is in fact t+s
+    return T[steps], L[steps]
+    
+def k2_method(k,t,lamb):
+    """
+    Returns the new lambda given by Theorem 4.1, Vaughan-I
+
+    Assume that lambda_t's satisfy is larger than the bound given by k2_bound. Then, for smooth enough numbers, the number of solutions of the diophantine equation with 2t variables x_1^k + ... + x_t^k = y_1^k + ... + y_t^k is bounded by P^{lambda_t}. This algorithm checks all the values of theta up to a given precision in order to determine it the best choice, and return the appropriate value for lambda_t.
+
+    Parameters
+    ----------
+    k : int
+        the power appearing in the diophantine equation
+        should be >= 5
+    t : int
+        should satisfy t >= k-1
+    lamb : float
+        lambda_{t-1}, previous value of lambda
+
+    Returns
+    -------
+    float
+        lambda_t
+
+    Examples
+    -------
+    >>> k2_method(5,7,7.660821)
+        9.40165643902439
+    >>> k2_method(7,16,23.315152)
+        25.2361755022222
+        
+    Note: this is optimized according to Vaughan-I's remark after Table 4.2
+    """
+    theta = (2**(k-2)-1.0)/(k*(2**(k-2))+1)
+    return (2*t-2)*theta + 1 + lamb*(1-theta)
+    
+def j_method(k,t,lamb,tries=50):
+    """
+    Returns the new lambda given by Theorem 4.1
+
+    Assume that lambda_t's satisfy is larger than the bound given by k2_bound. Then, for smooth enough numbers, the number of solutions of the diophantine equation with 2t variables x_1^k + ... + x_t^k = y_1^k + ... + y_t^k is bounded by P^{lambda_t}. This algorithm checks all the values of theta up to a given precision in order to determine it the best choice, and return the appropriate value for lambda_t.
+
+    Parameters
+    ----------
+    k : int
+        the power appearing in the diophantine equation
+        should be >= 5
+    t : int
+        should satisfy t <= 2^{k-1}
+    lamb : float
+        lambda_{t-1}, previous value of lambda
+    tries : int (optional argument, default at 20)
+        number of tries (uniformly spaced) for theta
+
+    Returns
+    -------
+    float
+        lambda_t
+
+    Examples
+    -------
+    >>> j_method(5,3,2,100)
+        3.20000000000000
+    >>> j_method(7,10,12.172336,200)
+        13.9580776320076
+    >>> j_method(8,13,17.122450,200)
+        18.9574922797213
+    
+    Comment: this is slightly larger than what Vaughan obtained, but I suspect putting a larger number of tries would allow us to match the results completely
+             It may not even be important anyway, as we may not be using this at all once we take the minimum exponent of all the methods we have.
+    """
+    min_lamb = 10**7
+    # for each j such that 2^j >= t and 1<= j <= k-1, we check for each theta what happens.
+    # from the paper, we just need to satisfy the conditions for one of the j's, so we take minimal over j. We also take minimum over theta's
+    for j in range(1,k):
+        if 2**j < t:
+            continue
+        corr = 0
+        if j==k-2 or j==k-4 or (k-j) % 2 == 1:
+            corr = 1
+        # go over the thetas
+        for m in range(1,tries+1):
+            theta = m*1.0 / (k*tries)
+            tmp_lamb = max((2*t-2)*theta + 1 + lamb*(1-theta), (2*t-2-k)*theta+2-2**(1-j)+lamb*(1-theta))
+            tmp_lamb = max(tmp_lamb, ((2*t-2-k+(k-corr)*2**(-j))*theta+2-(j+1)*2**(-j)+lamb*(1-theta)*(1-t*2**(-j)))/(1-(1-theta)*(t-1)*2**(-j)))
+            if(tmp_lamb < min_lamb):
+                min_lamb = tmp_lamb
+    return min_lamb
+    
+#########
+# Mixing methods
+#########
+# Reference : Description of the algorithm in Section 5, Wooley, "Large Improvements in Waring's problem", Annals, 1992.
+# The results match Table 5.1 in loc. cit with a fair precision, test with:
+#print("k", "lambd(k, k+1)")
+#for k in range(2,88, 2):
+#    print('%6s %6s' % (k, lambd(k, k)))
+
+def lambd(k,s, oldlamb=-1, olds=-1):
+    """
+    Returns the a priori best lambda among the above methods
+
+    We follow Wooley heuristics in order to chose the good iterative method: 
+    Vaughan's B1 in the cases s=3 or s=4, Wooley's * in the intermediate case, 
+    and we should use Vaughan's (k-2) for large s but for now we keep with Wooley's *
+    
+    For now, we commented out the j1, j2 methods introduced along k-2 method.
+
+    Parameters
+    ----------
+    k : int
+        the power appearing in the diophantine equation
+        should be >= 5
+    s : int
+        should be >= 3
+
+    Returns
+    -------
+    float
+        lambda
+
+    Examples
+    -------
+    >>> lambd(6, 4)
+        4.33333333333333
+    >>> lambd(6, 8)
+        10.6851275827201
+    >>> lambd(6, 12)
+        18.1058569520266
+    >>> lambd(8, 17)
+        26.1932938712066
+    """
+    if s==1:
+        return 1
+    if s==2:
+        return 2
+    # the other cases, we run iteratively.
+    if oldlamb ==-1 and olds == -1:
+        oldlamb = 2
+        olds = 2
+    lamb = oldlamb
+    startpoint = olds
+    for t in range(startpoint+1,s+1):
+        oldlamb = lamb
+        lamb = 10**7
+        if t==3 or t==4:
+            lamb = min(lamb, b1_method(k,t))
+        if 2*(t-1)-k < oldlamb and oldlamb <= 2*(t-1):
+            lamb = min(lamb, star_method(k,oldlamb,t-1,1)[1])
+        # Commented out j1, j2 methods for now
+        #if t <= 2**(k-1):
+        #    lamb = min(lamb, j_method(k,t,oldlamb,100)) # 100 can changed for better precision
+        if t >= k-1:
+            lamb = min(lamb, k2_method(k,t,oldlamb))
+    return lamb
+    
+def lambdaList(k,s_low,s_high):
+    """
+    Generating a whole list of lambd(k,s) where s_low <= s <= s_high
+    
+    Parameters
+    ----------
+    k : int
+    s_low, s_high : pretty obvious from the description above
+    
+    Returns
+    -------
+    List of lists, each list being [k, s, lambda(k,s)]
+    """
+    L = [[k,s_low, lambd(k,s_low)]]
+    for s in range(s_low+1,s_high+1):
+        L.append([k, s, lambd(k,s,L[s-s_low-1][2],s-1)])
+    return L
+
+##################
+#
+# Writing to file
+#
+####################    
+def writeListToFile(k_low = 5, k_high = 200, s_high = 3000, writeFile = 'lambdaListings.csv'):
+    """
+    Write the list of lambdas to a file, each row has a triplet of numbers (k,s,lambda)
+    
+    Defaults are that:
+    k: 5-200
+    s: 1-1000
+    outputFile = lambdaListings.csv
+    """
+    with open(writeFile,'w') as wFile:
+        writer = csv.writer(wFile)
+        for k in range(k_low,k_high+1):
+            print "Starting with ", k
+            L = lambdaList(k,1,s_high)
+            writer.writerows(L)
+            print "Done with ", k
+    wFile.close()
+    
+def readFromFile(L=['lambdaListings.csv']):
+    """
+    L is a list of file names
+    
+    As a whole, the list of files should be a dictionary-style increasing order for (k,s) pairs
+    
+    We are returning a whole list M with structure as follows:
+    M[k][s] should give me the [s,lambda(k,s)] list. (It can be a list of lists, or 2-dimensional array)
+    
+    """
+    M=[]
+    k_low = 10**7
+    for f in L:
+        with open(f,'r') as rFile:
+            reader = csv.reader(rFile)
+            wholeFile = list(reader)
+        rFile.close()
+        for row in wholeFile:
+            row[0] = int(row[0],10)
+            row[1] = int(row[1],10)
+            row[2] = float(row[2])
+        if(wholeFile[0][0] <= k_low):
+            k_low = wholeFile[0][0]
+            for i in range(0,k_low):
+                M.append([])
+        k_prev = wholeFile[0][0]-1
+        for row in wholeFile:
+            if row[0] > k_prev:
+                M.append([])
+                M[row[0]].append([0,0])
+            k_prev = row[0]
+            M[k_prev].append([row[1],row[2]])
+    return M
+
+def interpolate(x,L):
+    """
+    An auxiliary interpolating function
+    
+    Parameters
+    ----------
+    x : float
+        value to interpolate for
+    L : list of tuples, each tuple being (argument, function value)
+    
+    Returns
+    -------
+    float
+        function value at x
+    """
+    k = len(L)
+    low = 0
+    high = k-1
+    while low < high-1:
+        mid = (low + high) // 2
+        if L[mid][0] == x:
+            return L[mid][1]
+        elif L[mid][0] < x:
+            low = mid
+        else:
+            high = mid
+    if L[low][0] == x:
+        return L[low][1]
+    if L[high][0] == x:
+        return L[high][1]
+    theta = (x-L[low][0])*1.0/(L[high][0]-L[low][0])
+    return L[low][1] * (1-theta) + theta*L[high][1]
+    
+def getLambda(M, k, x):
+    """
+    Interpolated (in s) version of lambd
+
+    Straightforward affine interpolation of lambd(k,s) for any real s, corresponding to equation (7.3) in Ford, "Representation of numbers as sums of unlike powers", J. London Math. Soc., 1995
+
+    Parameters
+    ----------
+    M : the list of lambda values
+    
+    k : int
+        the power appearing in the diophantine equation
+        should be >= 5
+    x : float
+        should be >= 3
+
+    Returns
+    -------
+    float
+        lambda
+
+    Examples
+    -------
+    >>> getLambda(M, 8, 4.56)
+        4.96162100707733
+    """
+    if k<=4:
+        h = sage.all.floor(x)
+        theta = x - h
+        l1=lambd(k, h)
+        l2=lambd(k, h+1, l1, h)
+        return (1-theta)*l1 + theta*l2
+    h = sage.all.floor(x)
+    theta = x-h
+    if theta==0:
+        return M[k][h][1]
+    return (1-theta)*M[k][h][1]+theta*M[k][h+1][1]
+    
+
+#########
+# Tools for optimizing Hölder's inequality
+#########
+# Reference : Ford, "Representation of numbers as sums of unlike powers", Section 7, J. London Math. Soc., 1995
+# We implement determine nearly-optimal coefficients to be chosen in the application of Hölder's inequality. This uses Ford' heuristics, for now without using his optimization algorithm since the heuristics already yields good enough values
+
+def init_coeff_ford(K):
+    """
+    Returns the list of exponents to be chosen in Hölder for the list K
+
+    Parameters
+    ----------
+    K : list
+        powers appearing in the mean square integral
+
+    Returns
+    -------
+    list
+        exponents to take in Hölder application
+
+    Examples
+    -------
+    init_coeff_ford([5, 7, 8, 9,10, 11, 12, 13, 14, 15, 16])
+        [(5, 5.65374496614497),
+         (7, 7.91520295260295),
+         (8, 9.04593194583195),
+         (9, 10.1766609390609),
+         (10, 11.3073899322899),
+         (11, 12.4381189255189),
+         (12, 13.5688479187479),
+         (13, 14.6995769119769),
+         (14, 15.8303059052059),
+         (15, 16.9610348984349),
+         (16, 18.0917638916639)]
+    """
+    k=len(K)
+    ak1=sum([1.0/K[i] for i in range(0, k)])
+    A=[[K[i],K[i]*1.0*ak1] for i in range(0, k)]
+    return A
+
+def diffPlusF1(M,ki,ai):
+    """
+    Return the right derivative of x_i lambda(k_i,1/x_i) / k_i, xi = 1/ai
+    """
+    m = sage.all.floor(ai)
+    return ((-m*getLambda(M,ki,m+1) + (m+1)*getLambda(M,ki,m))*1.0/ki)
+
+def diffMinusF1(M,ki,ai):
+    """
+    Return the left derivative of x_i lambda(k_i,1/x_i) / k_i, xi = 1/ai
+    """
+    m = sage.all.ceil(ai)
+    return ((-(m-1)*getLambda(M,ki,m) + m*getLambda(M,ki,m-1))*1.0/ki)
+
+def max2indices(L):
+    """
+    Auxiliary function to get the 2 indices corresponding to the 2 largest items in the list
+    
+    Assuming at least 2 items
+    
+    Return indices corresponding to [largest, 2nd_largest]
+    """
+    maxind1 = 0
+    maxind2 = 1
+    if L[0] < L[1]:
+        maxind1 = 1
+        maxind2 = 0
+    for i in range(2,len(L)):
+        if L[i] > L[maxind1]:
+            maxind2 = maxind1
+            maxind1 = i
+        elif L[i] > L[maxind2]:
+            maxind2 = i
+    return [maxind1,maxind2]
+
+def min2indices(L):
+    """
+    Auxiliary function to get the 2 indices corresponding to the 2 smallest items in the list
+    
+    Assuming at least 2 items
+    
+    Return indices corresponding to (smallest, 2nd_smallest)
+    """
+    minind1 = 0
+    minind2 = 1
+    if L[1] < L[0]:
+        minind1 = 1
+        minind2 = 0
+    for i in range(2,len(L)):
+        if L[i] < L[minind1]:
+            minind2 = minind1
+            minind1 = i
+        elif L[i] < L[minind2]:
+            minind2 = i
+    return [minind1,minind2]
+
+def best_coeff_Ford1(M,K):
+    """
+    M is the lambda list
+    
+    K is the exponent list
+    
+    return optimal list of exponents.
+    """
+    A = init_coeff_ford(K)
+    diffP = [diffPlusF1(M,K[i],A[i][1]) for i in range(len(K))]
+    diffM = [diffMinusF1(M,K[i],A[i][1]) for i in range(len(K))]
+    plusind = min2indices(diffP)
+    minusind = max2indices(diffM)
+    if plusind[0]!=minusind[0]:
+        curDiff = diffM[minusind[0]] - diffP[plusind[0]]
+    else:
+        curDiff = max(diffM[minusind[1]] - diffP[plusind[0]], diffM[minusind[0]]-diffP[plusind[1]])
+    while curDiff > 0:
+        if plusind[0]!=minusind[0]: # this is the max difference
+            plusF = sage.all.ceil(A[plusind[0]][1])-1
+            minusC = sage.all.floor(A[minusind[0]][1])+1
+            if (1.0/plusF - 1.0/A[plusind[0]][1]) < (1.0/A[minusind[0]][1]-1.0/minusC):
+                A[minusind[0]][1] = 1.0/((1.0/A[minusind[0]][1])-(1.0/plusF - 1.0/A[plusind[0]][1]))
+                A[plusind[0]][1] = plusF
+            else:
+                A[plusind[0]][1] = 1.0/((1.0/A[plusind[0]][1])+(1.0/A[minusind[0]][1]-1.0/minusC))
+                A[minusind[0]][1] = minusC
+            diffP[plusind[0]] = diffPlusF1(M,K[plusind[0]],A[plusind[0]][1])
+            diffM[minusind[0]] = diffMinusF1(M,K[minusind[0]],A[minusind[0]][1])
+            plusind = min2indices(diffP)
+            minusind = max2indices(diffM)
+            if plusind[0]!=minusind[0]:
+                curDiff = diffM[minusind[0]] - diffP[plusind[0]]
+            else:
+                curDiff = max(diffM[minusind[1]] - diffP[plusind[0]], diffM[minusind[0]]-diffP[plusind[1]])
+        elif curDiff==diffM[minusind[1]] - diffP[plusind[0]]:
+            plusF = sage.all.ceil(A[plusind[0]][1])-1
+            minusC = sage.all.floor(A[minusind[1]][1])+1
+            if (1.0/plusF - 1.0/A[plusind[0]][1]) < (1.0/A[minusind[1]][1]-1.0/minusC):
+                A[minusind[1]][1] = 1.0/((1.0/A[minusind[1]][1])-(1.0/plusF - 1.0/A[plusind[0]][1]))
+                A[plusind[0]][1] = plusF
+            else:
+                A[plusind[0]][1] = 1.0/((1.0/A[plusind[0]][1])+(1.0/A[minusind[1]][1]-1.0/minusC))
+                A[minusind[1]][1] = minusC
+            diffP[plusind[0]] = diffPlusF1(M,K[plusind[0]],A[plusind[0]][1])
+            diffM[minusind[1]] = diffMinusF1(M,K[minusind[1]],A[minusind[1]][1])
+            plusind = min2indices(diffP)
+            minusind = max2indices(diffM)
+            if plusind[0]!=minusind[0]:
+                curDiff = diffM[minusind[0]] - diffP[plusind[0]]
+            else:
+                curDiff = max(diffM[minusind[1]] - diffP[plusind[0]], diffM[minusind[0]]-diffP[plusind[1]])
+        else:
+            plusF = sage.all.ceil(A[plusind[1]][1])-1
+            minusC = sage.all.floor(A[minusind[0]][1])+1
+            if (1.0/plusF - 1.0/A[plusind[1]][1]) < (1.0/A[minusind[0]][1]-1.0/minusC):
+                A[minusind[0]][1] = 1.0/((1.0/A[minusind[0]][1])-(1.0/plusF - 1.0/A[plusind[1]][1]))
+                A[plusind[1]][1] = plusF
+            else:
+                A[plusind[1]][1] = 1.0/((1.0/A[plusind[1]][1])+(1.0/A[minusind[0]][1]-1.0/minusC))
+                A[minusind[0]][1] = minusC
+            diffP[plusind[1]] = diffPlusF1(M,K[plusind[1]],A[plusind[1]][1])
+            diffM[minusind[0]] = diffMinusF1(M,K[minusind[0]],A[minusind[0]][1])
+            plusind = min2indices(diffP)
+            minusind = max2indices(diffM)
+            if plusind[0]!=minusind[0]:
+                curDiff = diffM[minusind[0]] - diffP[plusind[0]]
+            else:
+                curDiff = max(diffM[minusind[1]] - diffP[plusind[0]], diffM[minusind[0]]-diffP[plusind[1]])
+    return A
+    
+def getPhi(K, M):
+    """
+    Returns the bound phi given by mean value theorems, so that
+    int_0^1 |\prod_r f_{k_r}|^2 <= (\prod_r f_{k_r})(0)^2 N^phi
+
+    Parameters
+    ----------
+    K : a list of int
+        the k_r's
+        
+    M : list of lambda values
+
+    Returns
+    -------
+    float
+        phi
+
+    Examples
+    -------
+    >>> getPhi([5,7,8,9,10,11,12,13,14,15], M)
+        -0.787271005540667
+        
+    The Ford coefficient thing will be deprecated in a later version. As the optimization will simultaneously be calculating phi.
+    """
+    A=best_coeff_Ford1(M,K)
+    L=[getLambda(M,A[i][0],A[i][1]) for i in range(len(A))]
+    phiD = sum([L[i]*1.0/(A[i][0]*A[i][1]) for i in range(len(A))])
+    return phiD - 2*sum([1.0/(A[i][0]) for i in range(len(A))]) # We already include the compensation terms in order to add back
+
+##############################################
+#
+#  Below is Ford 2
+#
+#
+
+def f_h_aux(h,k,j,theta):
+    """
+    Returns the exponent for the inequality \int_0^1 |F_h(x)|^{2^j} \,dx << P^{\mu(h,k,2^j, theta)}
+    
+    Don't use this. This is just an auxiliary function.
+    
+    Parameters
+    ----------
+    h : int
+    
+    k : int
+    
+    j : int (1 <= j <= h-1)
+    
+    theta : float (to be picked, 0 < theta <= 1/k)
+    
+    Returns
+    -------
+    exponent indicated in description
+    
+    Examples
+    --------
+    >>> f_h_aux(5,15,3,0.05)
+    7.1000000000
+    """
+    e_j = 0
+    if j==h-1:
+        e_j = 1
+    return 2**j - j + (2**j-1) * (1-k*theta+theta) + theta*e_j
+    
+def f_h_exp(h,k,a,theta):
+    """
+    Returns the exponent for the inequality \int_0^1 |F_h(x)|^{1/a} \,dx << P^{\mu(h,k,1/a, theta)}
+    
+    Don't use this. This is just an auxiliary function.
+    
+    Parameters
+    ----------
+    h : int
+    
+    k : int
+    
+    a : float (1/(2^(h-1)) <= a <= 1/2)
+    
+    theta : float (to be picked, 0 < theta <= 1/k)
+    
+    Returns
+    -------
+    exponent as described in description. This is interpolated version
+    
+    Examples
+    --------
+    >>> f_h_exp(3,4,1/3,0.2)
+    2.4000000000000
+    
+    """
+    B = sage.all.floor(1.0/a)
+    j = 1
+    while 2**j < B:
+        j+=1
+    j-=1
+    return f_h_aux(h,k,j,theta) * (1.0/a - 2**(j+1))/(-2**j) + f_h_aux(h,k,j+1,theta) * (1.0/a - 2**j)/(2**j)
+    
+def nu_aux(M, h,k,s,a, nu_old):
+    """
+    Reference: Ford 2
+    
+    Returns nu(h,k,s) with optimal choice of theta, given a and nu(h,k,s-1).
+    
+    Parameters
+    ----------
+    M : list of lambda values
+    
+    h : int
+   
+    k : int
+    
+    s : int
+        
+    a : float
+        choice: 1/(2^(h-1)) <= a <= 1/2. Usually 1/2, 1/3, 1/4, 1/8 or when s/(1-a) is an integer
+        
+    nu_old : float
+        value of nu(h,k,s-1)
+        
+    Returns
+    -------
+      nu(h,k,s) : float
+      
+    Example
+    -------
+    >>> N(nu_aux(M,3,4,3,0.25,2.6517390))
+    3.76084893278786
+    
+    >>> nu_aux(M,4,12,9,0.25,4.3723723)
+    4.89479562710215
+    """
+    if s==0:
+        return 1
+    if s==1:
+        return 1+h*1.0/k
+
+    minChoice = 10**7
+    j = 1
+    while 2**j < 1.0/a:
+        j += 1
+    j -= 1
+    # This is 2nd = 3rd term
+    dj = 0
+    if j==h-2:
+        dj = 2**(-j) - a
+
+    MKS = getLambda(M,k,s)
+    MKSa = getLambda(M,k,s*1.0/(1-a))
+    theta = h*1.0/k * MKS - h*1.0/k * (1-a) * MKSa - 1 + a*j + 2**(-j)
+    theta = theta*1.0 / (MKS - 1 - (1-a)*MKSa + (1-k)*(1-a) + dj)
+    d = h*1.0/k + theta + nu_old
+    b = (2*s-1)*theta + 1 + theta + (1.0*h/k-theta)*MKS
+    c = (2*s-1)*theta + (1-a)*(h*1.0/k-theta)*MKSa + a * f_h_exp(h,k,a,theta)
+
+    #debug line
+    #print "2nd = 3rd", h,k,s,a,theta,max(d,b,c)
+
+    if theta >= 0 and theta <= 1.0/k:
+        minChoice = min(minChoice, max(d,b,c))
+
+    # This is 1st = 2nd term
+    theta = (1+h*1.0/k*MKS-h*1.0/k-nu_old)/(MKS-2*s+1)
+    d = h*1.0/k + theta + nu_old
+    b = (2*s-1)*theta + 1 + theta + (1.0*h/k-theta)*MKS
+    c = (2*s-1)*theta + (1-a)*(h*1.0/k-theta)*MKSa + a * f_h_exp(h,k,a,theta)
+
+    #debug line
+    #print "1st = 2nd", h,k,s,a,theta,max(d,b,c)
+
+    if theta >= 0 and theta <= 1.0/k:
+        minChoice = min(minChoice, max(d,b,c))
+
+    # This is 1st = 3rd term
+
+    theta = h*1.0/k * (1-a) * MKSa -h/k - nu_old + 2 - a*j - 2**(-j)
+    theta = theta*1.0 / ((k-1)*(1-a)-dj + (1-a)*MKSa + 2 - 2*s)
+    
+    d = h*1.0/k + theta + nu_old
+    b = (2*s-1)*theta + 1 + theta + (1.0*h/k-theta)*MKS
+    c = (2*s-1)*theta + (1-a)*(h*1.0/k-theta)*MKSa + a * f_h_exp(h,k,a,theta)
+
+    #debug line
+    #print "1st = 3rd", h,k,s,a,theta,max(d,b,c)
+
+    if theta >= 0 and theta <= 1.0/k:
+        minChoice = min(minChoice, max(d,b,c))
+
+    # This is theta = 0
+    theta = 0
+    d = h*1.0/k + theta + nu_old
+    b = (2*s-1)*theta + 1 + theta + (1.0*h/k-theta)*MKS
+    c = (2*s-1)*theta + (1-a)*(h*1.0/k-theta)*MKSa + a * f_h_exp(h,k,a,theta)
+
+    #debug line
+    #print "Theta = 0", h,k,s,a,theta,max(d,b,c)
+
+    if theta >= 0 and theta <= 1.0/k:
+        minChoice = min(minChoice, max(d,b,c))
+
+    # This is theta = 1/k
+    theta = 1.0/k
+    d = h*1.0/k + theta + nu_old
+    b = (2*s-1)*theta + 1 + theta + (1.0*h/k-theta)*MKS
+    c = (2*s-1)*theta + (1-a)*(1.0*h/k-theta)*MKSa + a * f_h_exp(h,k,a,theta)
+
+    #debug line
+    #print "theta = 1/k", h,k,s,a,theta,max(d,b,c)
+
+    if theta >= 0 and theta <= 1.0/k:
+        minChoice = min(minChoice, max(d,b,c))
+    return minChoice
+
+
+def nu(M,h,k,s,old_s=0,old_nu = 1):
+    """
+    Return nu(h,k,s)
+    
+    There is an option to give a known pair of (s,nu), and also an option to specify precision.
+    
+    Paramters
+    ---------
+    M : list of lambda values
+    
+    h : int
+    
+    k : int
+    
+    s : int
+    
+    old_s : int (optional, default = 0)
+    
+    old_nu : float (optional, default = 1, corresponding to old_s = 0)
+    
+    Returns
+    -------
+    float value of nu(h,k,s)
+    
+    Example
+    -------
+    >>> nu(M,4,5,3,2,2.7080057)
+    3.78561047618293
+    """
+    min_nu_for_prev = old_nu
+    if s==0:
+        return 1
+    for c in range(old_s+1, s+1):
+        min_nu = 10**7
+        min_nu = min(min_nu, nu_aux(M,h,k,c,1.0/2,min_nu_for_prev))
+        if h>=3:
+            min_nu = min(min_nu, nu_aux(M,h,k,c,1.0/3,min_nu_for_prev))
+            min_nu = min(min_nu, nu_aux(M,h,k,c,1.0/4,min_nu_for_prev))
+            if h>=4:
+                min_nu = min(min_nu, nu_aux(M,h,k,c,1.0/8,min_nu_for_prev))
+        # we still have to check all a of the form: a = 1 - c/k, 2^(h-1) c /(2^(h-1)-1) < k < 2c
+        for z in range(sage.all.ceil(c * 2**(h-1) *1.0 / (2**(h-1) - 1)), sage.all.floor(2*c) + 1):
+            min_nu = min(min_nu, nu_aux(M,h,k,c,1-c*1.0/z,min_nu_for_prev))
+        min_nu_for_prev = min_nu
+    return min_nu_for_prev
+
+def nuList(M,h,k,s_low,s_high, progress_display = sage.all.false):
+    """
+    Generating a whole list of nu(h,k,s) where s_low <= s <= s_high
+    
+    TOCHECK: Currently it is particularly off for the case h=3, k=4... In other cases, it seems alright.
+    
+    Parameters
+    ----------
+    M : list of lambda values
+    h : int
+    k : int, should be >= h
+    s_low, s_high : pretty obvious from the description above
+    
+    Returns
+    -------
+    List of lists, each list being [h, k, s, nu(h,k,s)]
+    """
+    L = [[h,k,s_low, nu(M,h,k,s_low)]]
+    for s in range(s_low+1,s_high+1):
+        L.append([h,k, s, nu(M,h,k,s,s-1,L[s-s_low-1][3])])
+        if progress_display and s % 30 == 0:
+            print "Done with s up to ", s
+    return L
+    
+def writeNuListToFile(M, h_low=3, h_high = 15, k_low = 5, k_high = 200, up_mult = 5, writeFile = 'nuListings.csv'):
+    """
+    Write the list of nu's to a file, each row has a quadruple of numbers (h,k,s,nu)
+    
+    Defaults are that:
+    h: 3-15
+    k: 5-200
+    up_mult: integer determining the s-range, default = 5
+    s: 1 - (up_mult*k)
+    outputFile = nuListings.csv
+    
+    Importantly, for each h, we only generate those values of k >= h (actually even = is weird) 
+    """
+    with open(writeFile,'w') as wFile:
+        writer = csv.writer(wFile)
+        for h in range(h_low,h_high+1):
+            for k in range(max(h,k_low),k_high+1):
+                print "Starting with h=", h, " ,k=", k
+                L = nuList(M,h,k,1,up_mult*k,sage.all.true)
+                writer.writerows(L)
+                print "Done with h=", h, " ,k=", k
+    wFile.close()
+    
+
+def readNuFromSingleFile(L=['nuListings.csv']):
+    """
+    L is a list of ONE file name.
+    
+    As a whole, the files should be storing values in a dictionary-style increasing order for (h,k,s) pairs
+    
+    We are returning a whole list NL (NuList) with structure as follows:
+    NL[h][k][s] should give me the [s,lambda(k,s)] list. (It can be a list of list of lists, or 3-dimensional array)
+    """
+    NL=[]
+    h_low = 10**7
+    k_low = 10**7
+    h_prev = -1
+    for f in L:
+        with open(f,'r') as rFile:
+            reader = csv.reader(rFile)
+            wholeFile = list(reader)
+        rFile.close()
+        for row in wholeFile:
+            row[0] = int(row[0],10)
+            row[1] = int(row[1],10)
+            row[2] = int(row[2],10)
+            row[3] = float(row[3])
+        if(wholeFile[0][0] <= h_low):
+            h_low = wholeFile[0][0]
+        for i in range(h_prev+1,h_low):
+            NL.append([])
+        h_prev = wholeFile[0][0]-1
+        k_prev = wholeFile[0][1]-1
+        for row in wholeFile:
+            if row[0] > h_prev:
+                NL.append([])
+                k_prev = row[1]-1
+                for i in range(0,row[1]):
+                    NL[row[0]].append([])
+            h_prev = row[0]
+            if row[1] > k_prev:
+                NL[row[0]].append([])
+                NL[row[0]][row[1]].append([0,1])
+            k_prev = row[1]
+            NL[h_prev][k_prev].append([row[2],row[3]])
+    return NL
+
+#####################################################
+#
+# This is parallelizing the previous approach to write to files.
+# 
+# The list of file names will be 'nuListingsXX.csv',
+# where XX is 2-digit number corresponding to h
+# 
+# e.g. nuListings03.csv should be storing the nu(h,k,s) values with h=3
+#
+# e.g. nuListings15.csv should be storing the nu(h,k,s) values with h=15
+#
+# Usage:
+# ------
+#
+# To write the values to file:
+#
+# > writeNuListParallel(M)  #default mode. h=3 to 15, k = max(h+1,5) to 200, s = 1 to 5*k
+#
+# To read the values in:
+#
+# > NL = readNuListParallel() #default parameters will read h=3 to 15.
+#
+#####################################################
+
+def writeSingleNuListToFile(M, h, k_low = 5, k_high = 200, up_mult = 5, writeFile = 'nuListings'):
+    """
+    Write the list of nu's to a file, each row has a quadruple of numbers (h,k,s,nu)
+    
+    Defaults are that:
+    h: given
+    k: 5-200
+    up_mult: integer determining the s-range, default = 5
+    s: 1 - (up_mult*k)
+    outputFile = nuListingsXX.csv, where XX corresponds to h
+    
+    Importantly, for each h, we only generate those values of k >= h (actually even = is weird) 
+    """
+    if h <= 9:
+        writeFile += '0'
+    writeFile += str(h) + '.csv'
+    with open(writeFile,'w') as wFile:
+        writer = csv.writer(wFile)
+        for k in range(max(h,k_low),k_high+1):
+            print "Starting with h=", h, " ,k=", k
+            L = nuList(M,h,k,1,up_mult*k)
+            writer.writerows(L)
+            print "Done with h=", h, " ,k=", k
+    wFile.close()
+    return 1
+
+def writeNuAux(M, k_low=5, k_high=200, up_mult=5):
+    return lambda h: writeSingleNuListToFile(M, h, k_low, k_high, up_mult)
+
+from sage.parallel.map_reduce import RESetMapReduce
+
+def writeNuListParallel(M, h_low=3, h_high = 15, k_low = 5, k_high = 200, up_mult = 5):
+    """
+    This is writing to files the values we calculated in specified parameter range.
+    """
+    S = RESetMapReduce(
+        roots = range(h_low, h_high+1),
+        children = lambda l: [],
+        map_function = writeNuAux(M,k_low,k_high,up_mult),
+        reduce_function = lambda x, y: x + y,
+        reduce_init = 0)
+    S.run()
+    
+def readNuListParallel(h_low=3, h_high=15, readPrefix = 'nuListings'):
+    """
+    We are returning a whole list NL (NuList) with structure as follows:
+    NL[h][k][s] should give me the [s,lambda(k,s)] list. (It can be a list of list of lists, or 3-dimensional array)
+    """
+    NL = []
+    for i in range(h_low, h_high+1):
+        readTmp = readPrefix
+        if i <= 9:
+            readTmp += '0'
+        readTmp += str(i) + '.csv'
+        if i==h_low:
+            NL = readNuFromSingleFile([readTmp])
+        else:
+            NL.append(readNuFromSingleFile([readTmp])[i])
+    return NL
+
+##################################################
+#
+# Ending parallelization section.
+#
+##################################################
+
+def getNu(M,h,k,x, NL=[]):
+    """
+    NL is the nu listings. To make it slightly easier to use, I have allowed for the situation
+    has not been generated yet.
+    
+    Interpolated version of nu(h,k,s)
+    
+    This is returning nu(h,k,x)
+    """
+    if NL!=[]:
+        m = sage.all.floor(x)
+        theta = x-m
+        return (1-theta)*NL[h][k][m][1] + theta*NL[h][k][m+1][1]
+    
+    m = sage.all.floor(x)
+    theta = x - m
+    n1=nu(M,h,k, m)
+    n2=nu(M,h,k, m+1, m, n1)
+    return (1-theta)*n1 + theta*n2
+
+################
+#
+#
+#
+################
+
+def diffPlusF2(M,h,ki,ai,NL=[]):
+    """
+    Return the right derivative of x_i nu(h,k_i,1/x_i), xi = 1/ai
+    """
+    m = sage.all.floor(ai)
+    return (-m*getNu(M,h,ki,m+1,NL) + (m+1)*getNu(M,h,ki,m,NL))
+
+def diffMinusF2(M,h,ki,ai,NL=[]):
+    """
+    Return the left derivative of x_i nu(h,k_i,1/x_i) , xi = 1/ai
+    """
+    m = sage.all.ceil(ai)
+    return (-(m-1)*getNu(M,h,ki,m,NL) + m*getNu(M,h,ki,m-1,NL))
+
+def best_coeff_Ford2(M,h,K,NL):
+    """
+    M is the lambda list
+    
+    K is the exponent list
+    
+    return optimal list of exponents.
+    """
+    A = init_coeff_ford(K)
+    diffP = [diffPlusF2(M,h,K[i],A[i][1],NL) for i in range(len(K))]
+    diffM = [diffMinusF2(M,h,K[i],A[i][1],NL) for i in range(len(K))]
+    plusind = min2indices(diffP)
+    minusind = max2indices(diffM)
+    if plusind[0]!=minusind[0]:
+        curDiff = diffM[minusind[0]] - diffP[plusind[0]]
+    else:
+        curDiff = max(diffM[minusind[1]] - diffP[plusind[0]], diffM[minusind[0]]-diffP[plusind[1]])
+    while curDiff > 0:
+        if plusind[0]!=minusind[0]: # this is the max difference
+            plusF = sage.all.ceil(A[plusind[0]][1])-1
+            minusC = sage.all.floor(A[minusind[0]][1])+1
+            if (1.0/plusF - 1.0/A[plusind[0]][1]) < (1.0/A[minusind[0]][1]-1.0/minusC):
+                A[minusind[0]][1] = 1.0/((1.0/A[minusind[0]][1])-(1.0/plusF - 1.0/A[plusind[0]][1]))
+                A[plusind[0]][1] = plusF
+            else:
+                A[plusind[0]][1] = 1.0/((1.0/A[plusind[0]][1])+(1.0/A[minusind[0]][1]-1.0/minusC))
+                A[minusind[0]][1] = minusC
+            diffP[plusind[0]] = diffPlusF2(M,h,K[plusind[0]],A[plusind[0]][1],NL)
+            diffM[minusind[0]] = diffMinusF2(M,h,K[minusind[0]],A[minusind[0]][1],NL)
+            plusind = min2indices(diffP)
+            minusind = max2indices(diffM)
+            if plusind[0]!=minusind[0]:
+                curDiff = diffM[minusind[0]] - diffP[plusind[0]]
+            else:
+                curDiff = max(diffM[minusind[1]] - diffP[plusind[0]], diffM[minusind[0]]-diffP[plusind[1]])
+        elif curDiff==diffM[minusind[1]] - diffP[plusind[0]]:
+            plusF = sage.all.ceil(A[plusind[0]][1])-1
+            minusC = sage.all.floor(A[minusind[1]][1])+1
+            if (1.0/plusF - 1.0/A[plusind[0]][1]) < (1.0/A[minusind[1]][1]-1.0/minusC):
+                A[minusind[1]][1] = 1.0/((1.0/A[minusind[1]][1])-(1.0/plusF - 1.0/A[plusind[0]][1]))
+                A[plusind[0]][1] = plusF
+            else:
+                A[plusind[0]][1] = 1.0/((1.0/A[plusind[0]][1])+(1.0/A[minusind[1]][1]-1.0/minusC))
+                A[minusind[1]][1] = minusC
+            diffP[plusind[0]] = diffPlusF2(M,h,K[plusind[0]],A[plusind[0]][1],NL)
+            diffM[minusind[1]] = diffMinusF2(M,h,K[minusind[1]],A[minusind[1]][1],NL)
+            plusind = min2indices(diffP)
+            minusind = max2indices(diffM)
+            if plusind[0]!=minusind[0]:
+                curDiff = diffM[minusind[0]] - diffP[plusind[0]]
+            else:
+                curDiff = max(diffM[minusind[1]] - diffP[plusind[0]], diffM[minusind[0]]-diffP[plusind[1]])
+        else:
+            plusF = sage.all.ceil(A[plusind[1]][1])-1
+            minusC = sage.all.floor(A[minusind[0]][1])+1
+            if (1.0/plusF - 1.0/A[plusind[1]][1]) < (1.0/A[minusind[0]][1]-1.0/minusC):
+                A[minusind[0]][1] = 1.0/((1.0/A[minusind[0]][1])-(1.0/plusF - 1.0/A[plusind[1]][1]))
+                A[plusind[1]][1] = plusF
+            else:
+                A[plusind[1]][1] = 1.0/((1.0/A[plusind[1]][1])+(1.0/A[minusind[0]][1]-1.0/minusC))
+                A[minusind[0]][1] = minusC
+            diffP[plusind[1]] = diffPlusF2(M,h,K[plusind[1]],A[plusind[1]][1],NL)
+            diffM[minusind[0]] = diffMinusF2(M,h,K[minusind[0]],A[minusind[0]][1],NL)
+            plusind = min2indices(diffP)
+            minusind = max2indices(diffM)
+            if plusind[0]!=minusind[0]:
+                curDiff = diffM[minusind[0]] - diffP[plusind[0]]
+            else:
+                curDiff = max(diffM[minusind[1]] - diffP[plusind[0]], diffM[minusind[0]]-diffP[plusind[1]])
+    return A
+
+######################
+#
+# Optimizing coefficients
+#
+######################
+
+def getNuPhi(M,h,K, NL=[]):
+    A=best_coeff_Ford2(M,h,K,NL)
+    L=[getNu(M,h,A[i][0],A[i][1],NL) for i in range(len(A))]
+    phiD = sum([L[i]*1.0/(h*A[i][1]) for i in range(len(A))])
+    return phiD - 2.0/h - 2*sum([1.0/(A[i][0]) for i in range(len(A))]) # We already include the compensation terms in order to add back
+    
+###############################
+#
+# Simplifying initialisation
+#
+###############################
+
+def initialize():
+    """
+    Returning the data we need to read, M and NL
+    This is all assuming our usual default parameters.
+    """
+
+    M = readFromFile()
+    NL = readNuListParallel()
+
+    return [M,NL]
